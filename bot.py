@@ -2,8 +2,11 @@ import os
 import random
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+load_dotenv()
 
 
 DEFAULT_BROADCAST_CHAT_ID = -1003744224655
