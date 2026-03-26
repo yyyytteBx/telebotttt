@@ -201,6 +201,26 @@ async def _broadcast_vouch(
 
 
 # ---------------- COMMANDS ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text(
+        "👋 Welcome to Vouch Bot\n\n"
+        "Track reputation, view profiles, and manage trusted deals.\n\n"
+        "Quick commands:\n"
+        "/vouch @user message\n"
+        "/vouchanon @user message\n"
+        "/profile @user\n"
+        "/vouches @user\n"
+        "/top\n"
+        "/recent\n"
+        "/stats\n"
+        "/groupinfo\n\n"
+        "Use /search @user for more details."
+    )
+
+
 async def vouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -508,6 +528,7 @@ async def on_reaction_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ---------------- STARTUP ----------------
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
+        BotCommand("start", "Welcome message and command summary"),
         BotCommand("vouch", "Vouch for a user (stored + broadcast)"),
         BotCommand("vouchanon", "Vouch anonymously"),
         BotCommand("removevouch", "Remove your last vouch for a user"),
@@ -538,6 +559,7 @@ def run_bot() -> None:
         .post_init(post_init)
         .build()
     )
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("vouch", vouch))
     application.add_handler(CommandHandler("vouchanon", vouchanon))
     application.add_handler(CommandHandler("removevouch", removevouch))
