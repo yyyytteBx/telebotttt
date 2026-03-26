@@ -16,11 +16,12 @@ DEFAULT_BROADCAST_CHAT_ID = -1003744224655
 VOUCH_COOLDOWN_HOURS = 24
 ELITE_THRESHOLD = 20
 ONLINE_NOW_MESSAGES = (
-    "{bot_name} is online now.",
-    "{bot_name} just came online.",
-    "{bot_name} is up and running.",
-    "{bot_name} is online now and ready.",
-    "{bot_name} woke up and is online now.",
+    "loading loading loading\nme: 🧍‍♂️\nstill loading loading loading",
+    "loading...\nscrolling...\nstill loading...\ngo back to top 🔁",
+    "loading [■■■■□□□□□□] 40%\nloading [■■■■■■■□□□] 70%\nloading [■■■■■■■■■■] 100%\njust kidding... loading again",
+    "loading...\njust loading...\nalways loading...",
+    "LOADING LOADING LOADING LOADING LOADING LOADING LOADING\nLOADING LOADING LOADING LOADING LOADING LOADING",
+    "loading...\nloading...\nLOADING...\nwhy is it still loading",
 )
 RANDOM_VOUCH_LINES = (
     "Built different 💪",
