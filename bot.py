@@ -2,7 +2,8 @@ import os
 import random
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -13,6 +14,7 @@ load_dotenv(os.path.join('.venv', '.env'))
 
 
 DEFAULT_BROADCAST_CHAT_ID = -1003744224655
+PERTH_TZ = ZoneInfo("Australia/Perth")
 VOUCH_COOLDOWN_HOURS = 24
 ELITE_THRESHOLD = 20
 ONLINE_NOW_MESSAGES = (
@@ -1015,6 +1017,33 @@ async def on_reaction_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer(reactions.get(query.data, ""))
 
 
+
+# ---------------- SCHEDULED JOBS ----------------
+async def broadcast_vouches_of_the_day(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Dates are stored as naive local datetimes via datetime.now().isoformat(),
+    # so this comparison is correct when the server runs in Australia/Perth timezone.
+    today = datetime.now(PERTH_TZ).date()
+    _cur.execute(
+        "SELECT user, from_user, text FROM vouches WHERE date(date) = ?",
+        (today.isoformat(),),
+    )
+    todays_vouches = _cur.fetchall()
+
+    if not todays_vouches:
+        print(f"No vouches to broadcast for {today}.")
+        return
+
+    message = "📜 *Vouches of the Day*\n\n"
+    for i, (user, from_user, text) in enumerate(todays_vouches, 1):
+        message += f"{i}. *{user}* vouched by *{from_user}*:\n_{text}_\n\n"
+
+    await context.bot.send_message(
+        chat_id=_get_broadcast_chat_id(),
+        text=message,
+        parse_mode="Markdown",
+    )
+
+
 # ---------------- STARTUP ----------------
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
@@ -1035,6 +1064,11 @@ async def post_init(application: Application) -> None:
         chat_id=_get_broadcast_chat_id(),
         text=_build_online_now_message(bot_name),
     )
+    if application.job_queue is not None:
+        application.job_queue.run_daily(
+            broadcast_vouches_of_the_day,
+            time=time(hour=17, minute=0, tzinfo=PERTH_TZ),
+        )
 
 
 def run_bot() -> None:
