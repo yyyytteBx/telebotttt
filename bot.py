@@ -393,6 +393,39 @@ async def vouches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await message.reply_text(msg)
 
 
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /history @user")
+        return
+    target = context.args[0]
+    _cur.execute(
+        "SELECT from_user, text, date FROM vouches WHERE user=? ORDER BY date ASC",
+        (target,),
+    )
+    rows = _cur.fetchall()
+    if not rows:
+        await message.reply_text(f"No vouches found for {target}.")
+        return
+    header = f"📜 Full vouch history for {target} ({len(rows)} total):\n\n"
+    lines_out = []
+    for r in rows:
+        from_user, text, date = r
+        date_str = f" [{date}]" if date else ""
+        lines_out.append(f"@{from_user}{date_str}: {text}")
+    # Send in chunks to respect Telegram's 4096-character message limit
+    chunk = header
+    for line in lines_out:
+        if len(chunk) + len(line) + 1 > 4095:
+            await message.reply_text(chunk)
+            chunk = f"📜 (continued) Vouches for {target}:\n\n"
+        chunk += line + "\n"
+    if chunk:
+        await message.reply_text(chunk)
+
+
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -537,6 +570,7 @@ async def post_init(application: Application) -> None:
         BotCommand("unvouch", "Broadcast an unvouch"),
         BotCommand("negvouch", "Broadcast a negative vouch (admin only)"),
         BotCommand("vouches", "View vouches for a user"),
+        BotCommand("history", "View full history of vouches received by a user"),
         BotCommand("profile", "View a user's vouch profile"),
         BotCommand("stats", "View your own vouch stats"),
         BotCommand("search", "Search vouches given and received by a user"),
@@ -568,6 +602,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("unvouch", unvouch))
     application.add_handler(CommandHandler("negvouch", negvouch))
     application.add_handler(CommandHandler("vouches", vouches_cmd))
+    application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("search", search))
@@ -912,6 +947,7 @@ async def post_init(application: Application) -> None:
         BotCommand("unvouch", "Broadcast an unvouch"),
         BotCommand("negvouch", "Broadcast a negative vouch"),
         BotCommand("vouches", "View vouches for a user"),
+        BotCommand("history", "View full history of vouches received by a user"),
         BotCommand("profile", "View a user's vouch profile"),
         BotCommand("top", "Top 10 most vouched users"),
         BotCommand("groupinfo", "Export info about this group"),
@@ -937,6 +973,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("unvouch", unvouch))
     application.add_handler(CommandHandler("negvouch", negvouch))
     application.add_handler(CommandHandler("vouches", vouches_cmd))
+    application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("top", top))
     application.add_handler(CommandHandler("groupinfo", groupinfo))
