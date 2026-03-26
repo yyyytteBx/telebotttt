@@ -9,6 +9,7 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 load_dotenv()
+load_dotenv(os.path.join('.venv', '.env'))
 
 
 DEFAULT_BROADCAST_CHAT_ID = -1003744224655
@@ -108,7 +109,7 @@ def _get_required_token() -> str:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError(
-            "Set the TELEGRAM_BOT_TOKEN environment variable before starting the bot."
+            "Missing TELEGRAM_BOT_TOKEN. Put it in project .env (preferred) or .venv/.env."
         )
     return token
 
