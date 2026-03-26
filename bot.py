@@ -1,0 +1,787 @@
+import os
+import random
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+
+load_dotenv()
+load_dotenv(os.path.join('.venv', '.env'))
+
+
+DEFAULT_BROADCAST_CHAT_ID = -1003744224655
+VOUCH_COOLDOWN_HOURS = 24
+ELITE_THRESHOLD = 20
+ONLINE_NOW_MESSAGES = (
+    "loading loading loading\nme: 🧍‍♂️\nstill loading loading loading",
+    "loading...\nscrolling...\nstill loading...\ngo back to top 🔁",
+    "loading [■■■■□□□□□□] 40%\nloading [■■■■■■■□□□] 70%\nloading [■■■■■■■■■■] 100%\njust kidding... loading again",
+    "loading...\njust loading...\nalways loading...",
+    "LOADING LOADING LOADING LOADING LOADING LOADING LOADING\nLOADING LOADING LOADING LOADING LOADING LOADING",
+    "loading...\nloading...\nLOADING...\nwhy is it still loading",
+)
+RANDOM_VOUCH_LINES = (
+    "Built different 💪",
+    "Certified legend 🏆",
+    "Smooth deal 🔥",
+    "Trusted like WiFi 📶",
+)
+
+# ---------------- DB SETUP ----------------
+_db = sqlite3.connect("vouch.db", check_same_thread=False)
+_cur = _db.cursor()
+
+_cur.executescript("""
+CREATE TABLE IF NOT EXISTS vouches (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user      TEXT,
+    from_user TEXT,
+    text      TEXT,
+    date      TEXT
+);
+CREATE TABLE IF NOT EXISTS limits (
+    user  TEXT,
+    date  TEXT,
+    count INTEGER
+);
+CREATE TABLE IF NOT EXISTS blacklist (
+    user     TEXT PRIMARY KEY,
+    reason   TEXT,
+    added_by TEXT,
+    date     TEXT
+);
+CREATE TABLE IF NOT EXISTS anon_vouch_pending (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    target       TEXT,
+    real_from    TEXT,
+    from_user_id INTEGER,
+    text         TEXT,
+    date         TEXT,
+    status       TEXT DEFAULT 'pending'
+);
+""")
+_db.commit()
+
+
+# ---------------- DB HELPERS ----------------
+def _get_rank(count: int) -> str:
+    if count < 5:
+        return "Newbie 🐣"
+    elif count < ELITE_THRESHOLD:
+        return "Trusted ✅"
+    return "Elite 🏆"
+
+
+def _can_vouch(user: str) -> bool:
+    today = datetime.now().date().isoformat()
+    _cur.execute("SELECT count FROM limits WHERE user=? AND date=?", (user, today))
+    row = _cur.fetchone()
+    if not row:
+        _cur.execute("INSERT INTO limits VALUES (?, ?, ?)", (user, today, 1))
+        _db.commit()
+        return True
+    if row[0] >= 3:
+        return False
+    _cur.execute(
+        "UPDATE limits SET count = count + 1 WHERE user=? AND date=?", (user, today)
+    )
+    _db.commit()
+    return True
+
+
+def _on_cooldown(from_user: str, target: str) -> bool:
+    cutoff = (datetime.now() - timedelta(hours=VOUCH_COOLDOWN_HOURS)).isoformat()
+    _cur.execute(
+        "SELECT 1 FROM vouches WHERE user=? AND from_user=? AND date > ?",
+        (target, from_user, cutoff),
+    )
+    return _cur.fetchone() is not None
+
+
+def _is_blacklisted(user: str) -> tuple[bool, str]:
+    _cur.execute("SELECT reason FROM blacklist WHERE user=?", (user,))
+    row = _cur.fetchone()
+    return (True, row[0]) if row else (False, "")
+
+
+def _get_admin_id() -> int | None:
+    raw = os.getenv("TELEGRAM_ADMIN_USER_ID")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+# ---------------- BROADCAST HELPERS ----------------
+@dataclass(frozen=True)
+class VouchRequest:
+    action_label: str
+    target: str
+    reason: str
+
+
+def _get_required_token() -> str:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Missing TELEGRAM_BOT_TOKEN. Put it in project .env (preferred) or .venv/.env."
+        )
+    return token
+
+
+def _get_broadcast_chat_id() -> int:
+    raw_chat_id = os.getenv("TELEGRAM_BROADCAST_CHAT_ID")
+    if raw_chat_id is None:
+        return DEFAULT_BROADCAST_CHAT_ID
+    return int(raw_chat_id)
+
+
+def _build_online_now_message(bot_name: str) -> str:
+    return random.choice(ONLINE_NOW_MESSAGES).format(bot_name=bot_name)
+
+
+def _build_actor_name(update: Update) -> str:
+    user = update.effective_user
+    if user is None:
+        raise RuntimeError("A Telegram user is required to create a vouch action.")
+    return f"{user.full_name} (@{user.username})" if user.username else user.full_name
+
+
+def _build_source_chat(update: Update) -> str:
+    chat = update.effective_chat
+    if chat is None:
+        raise RuntimeError("A Telegram chat is required to create a vouch action.")
+    title = chat.title or chat.full_name or chat.username or "Direct Message"
+    return f"{title} ({chat.id})"
+
+
+def _parse_vouch_request(
+    command_name: str,
+    action_label: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> VouchRequest:
+    if not context.args or len(context.args) < 2:
+        raise ValueError(f"Usage: /{command_name} @username reason")
+    target = context.args[0].strip()
+    reason = " ".join(context.args[1:]).strip()
+    if not target.startswith("@"):
+        raise ValueError(f"Usage: /{command_name} @username reason")
+    if not reason:
+        raise ValueError(f"Usage: /{command_name} @username reason")
+    return VouchRequest(action_label=action_label, target=target, reason=reason)
+
+
+async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return False
+    if chat.type == "private":
+        return True
+    member = await context.bot.get_chat_member(chat.id, user.id)
+    return member.status in ("administrator", "creator")
+
+
+async def _broadcast_vouch(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    command_name: str,
+    action_label: str,
+    admin_only: bool = False,
+) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if admin_only and not await _is_admin(update, context):
+        await message.reply_text("❌ Only group admins can use this command.")
+        return
+    try:
+        request = _parse_vouch_request(command_name, action_label, context)
+    except ValueError as error:
+        await message.reply_text(str(error))
+        return
+    actor = _build_actor_name(update)
+    source_chat = _build_source_chat(update)
+    broadcast_message = (
+        f"{request.action_label}\n"
+        f"Target: {request.target}\n"
+        f"From: {actor}\n"
+        f"Reason: {request.reason}\n"
+        f"Source chat: {source_chat}"
+    )
+    await context.bot.send_message(chat_id=_get_broadcast_chat_id(), text=broadcast_message)
+    await message.reply_text(
+        f"{request.action_label} for {request.target} was broadcast successfully."
+    )
+
+
+# ---------------- COMMANDS ----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text(
+        "👋 Welcome to Vouch Bot\n\n"
+        "Track reputation, view profiles, and manage trusted deals.\n\n"
+        "Quick commands:\n"
+        "/vouch @user message\n"
+        "/vouchanon @user message\n"
+        "/profile @user\n"
+        "/vouches @user\n"
+        "/top\n"
+        "/recent\n"
+        "/stats\n"
+        "/groupinfo\n\n"
+        "Use /search @user for more details."
+    )
+
+
+async def vouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /vouch @user message")
+        return
+
+    from_user = update.effective_user.username or str(update.effective_user.id)
+    target = context.args[0]
+
+    # Prevent self-vouching
+    target_clean = target.lstrip("@").lower()
+    if from_user.lower() == target_clean or str(update.effective_user.id) == target_clean:
+        await message.reply_text("❌ You cannot vouch for yourself!")
+        return
+
+    if not _can_vouch(from_user):
+        await message.reply_text("❌ Daily vouch limit reached (3)")
+        return
+
+    if _on_cooldown(from_user, target):
+        await message.reply_text(
+            f"⏱️ You already vouched for {target} in the last {VOUCH_COOLDOWN_HOURS}h"
+        )
+        return
+
+    text = " ".join(context.args[1:]).strip() or random.choice(RANDOM_VOUCH_LINES)
+
+    _cur.execute(
+        "INSERT INTO vouches (user, from_user, text, date) VALUES (?, ?, ?, ?)",
+        (target, from_user, text, datetime.now().isoformat()),
+    )
+    _db.commit()
+
+    # Check if target just crossed Elite threshold — announce it
+    _cur.execute("SELECT COUNT(*) FROM vouches WHERE user=?", (target,))
+    new_count = _cur.fetchone()[0]
+    if new_count == ELITE_THRESHOLD:
+        await context.bot.send_message(
+            chat_id=_get_broadcast_chat_id(),
+            text=f"🏆 {target} just reached Elite rank with {new_count} vouches!",
+        )
+
+    actor = _build_actor_name(update)
+    source_chat = _build_source_chat(update)
+    await context.bot.send_message(
+        chat_id=_get_broadcast_chat_id(),
+        text=(
+            f"Vouch\nTarget: {target}\nFrom: {actor}\nReason: {text}\n"
+            f"Source chat: {source_chat}\n"
+            "👍🔥❌"
+        ),
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("👍", callback_data="legit"),
+            InlineKeyboardButton("🔥", callback_data="fire"),
+            InlineKeyboardButton("❌", callback_data="cap"),
+        ]]
+    )
+    await message.reply_text(
+        f"🧾 VOUCH\nFrom: @{from_user}\nTo: {target}\n💬 {text}",
+        reply_markup=keyboard,
+    )
+
+
+async def vouchanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or not context.args:
+        if message:
+            await message.reply_text("Usage: /vouchanon @user message")
+        return
+
+    from_user = update.effective_user.username or str(update.effective_user.id)
+    from_user_id = update.effective_user.id
+    target = context.args[0]
+
+    # Prevent self-vouching
+    target_clean = target.lstrip("@").lower()
+    if from_user.lower() == target_clean or str(from_user_id) == target_clean:
+        await message.reply_text("❌ You cannot vouch for yourself!")
+        return
+
+    text = " ".join(context.args[1:]).strip() or random.choice(RANDOM_VOUCH_LINES)
+
+    # Store as pending (not immediately broadcast)
+    _cur.execute(
+        "INSERT INTO anon_vouch_pending (target, real_from, from_user_id, text, date, status)"
+        " VALUES (?, ?, ?, ?, ?, 'pending')",
+        (target, from_user, from_user_id, text, datetime.now().isoformat()),
+    )
+    _db.commit()
+    vouch_id = _cur.lastrowid
+
+    # Send DM to admin with approve/reject buttons
+    admin_id = _get_admin_id()
+    if admin_id:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"anon_approve:{vouch_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"anon_reject:{vouch_id}"),
+        ]])
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"🔔 Pending Anonymous Vouch\n\n"
+                    f"Target: {target}\n"
+                    f"From: @{from_user}\n"
+                    f"Message: {text}\n"
+                    f"Vouch ID: #{vouch_id}"
+                ),
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
+
+    await message.reply_text(
+        "✅ Your anonymous vouch has been submitted for admin review.\n"
+        "It will be broadcast once approved."
+    )
+
+
+async def pending_vouches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    admin_id = _get_admin_id()
+    if admin_id is not None and user.id != admin_id:
+        await message.reply_text("❌ This command is for admins only.")
+        return
+
+    _cur.execute(
+        "SELECT id, target, real_from, text, date FROM anon_vouch_pending"
+        " WHERE status='pending' ORDER BY date ASC"
+    )
+    rows = _cur.fetchall()
+    if not rows:
+        await message.reply_text("✅ No pending anonymous vouches.")
+        return
+
+    for row in rows:
+        vouch_id, target, real_from, text, date = row
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"anon_approve:{vouch_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"anon_reject:{vouch_id}"),
+        ]])
+        await message.reply_text(
+            f"🔔 Pending Vouch #{vouch_id}\n\n"
+            f"Target: {target}\n"
+            f"From: @{real_from}\n"
+            f"Message: {text}\n"
+            f"Date: {date[:10]}",
+            reply_markup=keyboard,
+        )
+
+
+async def removevouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /removevouch @user")
+        return
+    from_user = update.effective_user.username or str(update.effective_user.id)
+    target = context.args[0]
+    _cur.execute(
+        "DELETE FROM vouches WHERE id = ("
+        "  SELECT id FROM vouches WHERE user=? AND from_user=? ORDER BY date DESC LIMIT 1"
+        ")",
+        (target, from_user),
+    )
+    _db.commit()
+    if _cur.rowcount:
+        await message.reply_text(f"🗑️ Your most recent vouch for {target} was removed.")
+    else:
+        await message.reply_text(f"No vouch from you to {target} found.")
+
+
+async def unvouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _broadcast_vouch(update, context, "unvouch", "Unvouch")
+
+
+async def negvouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _broadcast_vouch(update, context, "negvouch", "Negative vouch", admin_only=True)
+
+
+async def blacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not await _is_admin(update, context):
+        await message.reply_text("❌ Only group admins can use this command.")
+        return
+    if not context.args or len(context.args) < 2:
+        await message.reply_text("Usage: /blacklist @user reason")
+        return
+    target = context.args[0]
+    reason = " ".join(context.args[1:])
+    added_by = update.effective_user.username or str(update.effective_user.id)
+    _cur.execute(
+        "INSERT OR REPLACE INTO blacklist (user, reason, added_by, date) VALUES (?, ?, ?, ?)",
+        (target, reason, added_by, datetime.now().isoformat()),
+    )
+    _db.commit()
+    await message.reply_text(f"🚫 {target} has been blacklisted.\nReason: {reason}")
+    await context.bot.send_message(
+        chat_id=_get_broadcast_chat_id(),
+        text=f"🚫 BLACKLIST\nUser: {target}\nReason: {reason}\nAdded by: @{added_by}",
+    )
+
+
+async def unblacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not await _is_admin(update, context):
+        await message.reply_text("❌ Only group admins can use this command.")
+        return
+    if not context.args:
+        await message.reply_text("Usage: /unblacklist @user")
+        return
+    target = context.args[0]
+    _cur.execute("DELETE FROM blacklist WHERE user=?", (target,))
+    _db.commit()
+    if _cur.rowcount:
+        await message.reply_text(f"✅ {target} has been removed from the blacklist.")
+    else:
+        await message.reply_text(f"{target} is not on the blacklist.")
+
+
+async def vouches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /vouches @user")
+        return
+    target = context.args[0]
+    _cur.execute("SELECT from_user, text FROM vouches WHERE user=?", (target,))
+    rows = _cur.fetchall()
+    if not rows:
+        await message.reply_text("No vouches yet.")
+        return
+    msg = f"📜 Vouches for {target}:\n\n"
+    for r in rows[-10:]:
+        msg += f"@{r[0]}: {r[1]}\n"
+    await message.reply_text(msg)
+
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /profile @user")
+        return
+    target = context.args[0]
+    _cur.execute("SELECT COUNT(*) FROM vouches WHERE user=?", (target,))
+    count = _cur.fetchone()[0]
+    blacklisted, bl_reason = _is_blacklisted(target)
+    lines = [
+        f"👤 {target}",
+        f"⭐ Vouches: {count}",
+        f"🏆 Rank: {_get_rank(count)}",
+    ]
+    if blacklisted:
+        lines.append(f"\n🚫 BLACKLISTED\nReason: {bl_reason}")
+    await message.reply_text("\n".join(lines))
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    me = update.effective_user.username or str(update.effective_user.id)
+    _cur.execute("SELECT COUNT(*) FROM vouches WHERE from_user=?", (me,))
+    given = _cur.fetchone()[0]
+    _cur.execute("SELECT COUNT(*) FROM vouches WHERE user=?", (f"@{me}",))
+    received = _cur.fetchone()[0]
+    await message.reply_text(
+        f"📊 Your Stats (@{me})\n"
+        f"✅ Vouches given: {given}\n"
+        f"⭐ Vouches received: {received}\n"
+        f"🏆 Rank: {_get_rank(received)}"
+    )
+
+
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /search @user")
+        return
+    target = context.args[0]
+    _cur.execute("SELECT from_user, text FROM vouches WHERE user=?", (target,))
+    received = _cur.fetchall()
+    _cur.execute("SELECT user, text FROM vouches WHERE from_user=?", (target.lstrip("@"),))
+    given = _cur.fetchall()
+    parts = [f"🔍 Search results for {target}"]
+    if received:
+        parts.append(f"\n📥 Received ({len(received)}):")
+        for r in received[-5:]:
+            parts.append(f"  @{r[0]}: {r[1]}")
+    else:
+        parts.append("\n📥 Received: none")
+    if given:
+        parts.append(f"\n📤 Given ({len(given)}):")
+        for r in given[-5:]:
+            parts.append(f"  → {r[0]}: {r[1]}")
+    else:
+        parts.append("\n📤 Given: none")
+    await message.reply_text("\n".join(parts))
+
+
+async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    _cur.execute(
+        "SELECT from_user, user, text, date FROM vouches ORDER BY date DESC LIMIT 5"
+    )
+    rows = _cur.fetchall()
+    if not rows:
+        await message.reply_text("No vouches recorded yet.")
+        return
+    msg = "📌 Recent Vouches:\n\n"
+    for r in rows:
+        ts = r[3][:10]
+        msg += f"@{r[0]} → {r[1]}: {r[2]} [{ts}]\n"
+    await message.reply_text(msg)
+
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    _cur.execute(
+        "SELECT user, COUNT(*) as c FROM vouches GROUP BY user ORDER BY c DESC LIMIT 10"
+    )
+    rows = _cur.fetchall()
+    if not rows:
+        await message.reply_text("No vouches recorded yet.")
+        return
+    msg = "🏆 Top Trusted Users:\n\n"
+    for i, r in enumerate(rows, 1):
+        msg += f"{i}. {r[0]} — {r[1]} vouches\n"
+    await message.reply_text(msg)
+
+
+async def groupinfo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return
+    full_chat = await context.bot.get_chat(chat.id)
+    title = full_chat.title or full_chat.full_name or full_chat.username or "N/A"
+    username = f"@{full_chat.username}" if full_chat.username else "N/A"
+    description = full_chat.description or "N/A"
+    member_count = await context.bot.get_chat_member_count(chat.id)
+    invite_link = full_chat.invite_link or "N/A"
+    await message.reply_text(
+        "\n".join([
+            "📋 Group Info",
+            f"Title: {title}",
+            f"Type: {full_chat.type}",
+            f"ID: {full_chat.id}",
+            f"Username: {username}",
+            f"Members: {member_count}",
+            f"Description: {description}",
+            f"Invite link: {invite_link}",
+        ])
+    )
+
+
+# ---------------- CALLBACK HANDLERS ----------------
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+
+    if data.startswith("anon_approve:") or data.startswith("anon_reject:"):
+        await _handle_anon_vouch_callback(update, context)
+        return
+
+    # Reaction buttons on regular vouches
+    reactions = {"legit": "👍 Legit!", "fire": "🔥 Fire!", "cap": "❌ Cap!"}
+    await query.answer(reactions.get(data, ""))
+
+
+async def _handle_anon_vouch_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    user = update.effective_user
+    admin_id = _get_admin_id()
+    if admin_id is not None and (user is None or user.id != admin_id):
+        await query.answer("❌ Only the admin can approve or reject vouches.")
+        return
+
+    data = query.data or ""
+
+    if data.startswith("anon_approve:"):
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            await query.answer("Invalid callback data.")
+            return
+        vouch_id = int(parts[1])
+        _cur.execute(
+            "SELECT target, real_from, from_user_id, text FROM anon_vouch_pending"
+            " WHERE id=? AND status='pending'",
+            (vouch_id,),
+        )
+        row = _cur.fetchone()
+        if not row:
+            await query.answer("Vouch not found or already processed.")
+            return
+        target, real_from, from_user_id, text = row
+
+        # Mark as approved and insert into public vouches table
+        _cur.execute(
+            "UPDATE anon_vouch_pending SET status='approved' WHERE id=?", (vouch_id,)
+        )
+        _cur.execute(
+            "INSERT INTO vouches (user, from_user, text, date) VALUES (?, ?, ?, ?)",
+            (target, "anonymous", text, datetime.now().isoformat()),
+        )
+        _db.commit()
+
+        # Broadcast publicly — no submitter info
+        await context.bot.send_message(
+            chat_id=_get_broadcast_chat_id(),
+            text=f"👀 Someone vouched for {target}\n💬 {text}",
+        )
+
+        await query.answer("✅ Vouch approved and broadcast!")
+        await query.edit_message_text(
+            f"✅ Approved and broadcast\n\nTarget: {target}\nMessage: {text}"
+        )
+
+    elif data.startswith("anon_reject:"):
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            await query.answer("Invalid callback data.")
+            return
+        vouch_id = int(parts[1])
+        _cur.execute(
+            "SELECT target, real_from, from_user_id, text FROM anon_vouch_pending"
+            " WHERE id=? AND status='pending'",
+            (vouch_id,),
+        )
+        row = _cur.fetchone()
+        if not row:
+            await query.answer("Vouch not found or already processed.")
+            return
+        target, real_from, from_user_id, text = row
+
+        # Mark as rejected (keep the record for audit)
+        _cur.execute(
+            "UPDATE anon_vouch_pending SET status='rejected' WHERE id=?", (vouch_id,)
+        )
+        _db.commit()
+
+        # Notify the submitter
+        if from_user_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=from_user_id,
+                    text=f"❌ Your anonymous vouch for {target} was rejected by an admin.",
+                )
+            except Exception:
+                pass
+
+        await query.answer("❌ Vouch rejected.")
+        await query.edit_message_text(
+            f"❌ Rejected\n\nTarget: {target}\nMessage: {text}"
+        )
+
+
+# ---------------- STARTUP ----------------
+async def post_init(application: Application) -> None:
+    await application.bot.set_my_commands([
+        BotCommand("start", "Welcome message and command summary"),
+        BotCommand("vouch", "Vouch for a user (stored + broadcast)"),
+        BotCommand("vouchanon", "Vouch anonymously (requires admin approval)"),
+        BotCommand("pending_vouches", "View pending anonymous vouches (admin only)"),
+        BotCommand("removevouch", "Remove your last vouch for a user"),
+        BotCommand("unvouch", "Broadcast an unvouch"),
+        BotCommand("negvouch", "Broadcast a negative vouch (admin only)"),
+        BotCommand("vouches", "View vouches for a user"),
+        BotCommand("profile", "View a user's vouch profile"),
+        BotCommand("stats", "View your own vouch stats"),
+        BotCommand("search", "Search vouches given and received by a user"),
+        BotCommand("recent", "Last 5 vouches across all users"),
+        BotCommand("top", "Top 10 most vouched users"),
+        BotCommand("blacklist", "Blacklist a user (admin only)"),
+        BotCommand("unblacklist", "Remove a user from blacklist (admin only)"),
+        BotCommand("groupinfo", "Export info about this group"),
+    ])
+    me = await application.bot.get_me()
+    bot_name = f"@{me.username}" if me.username else me.full_name
+    await application.bot.send_message(
+        chat_id=_get_broadcast_chat_id(),
+        text=_build_online_now_message(bot_name),
+    )
+
+
+def run_bot() -> None:
+    application = (
+        Application.builder()
+        .token(_get_required_token())
+        .post_init(post_init)
+        .build()
+    )
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("vouch", vouch))
+    application.add_handler(CommandHandler("vouchanon", vouchanon))
+    application.add_handler(CommandHandler("pending_vouches", pending_vouches))
+    application.add_handler(CommandHandler("removevouch", removevouch))
+    application.add_handler(CommandHandler("unvouch", unvouch))
+    application.add_handler(CommandHandler("negvouch", negvouch))
+    application.add_handler(CommandHandler("vouches", vouches_cmd))
+    application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("search", search))
+    application.add_handler(CommandHandler("recent", recent))
+    application.add_handler(CommandHandler("top", top))
+    application.add_handler(CommandHandler("blacklist", blacklist_cmd))
+    application.add_handler(CommandHandler("unblacklist", unblacklist_cmd))
+    application.add_handler(CommandHandler("groupinfo", groupinfo))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    run_bot()
