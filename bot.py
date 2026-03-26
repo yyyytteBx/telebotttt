@@ -414,6 +414,43 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("\n".join(lines))
 
 
+async def rep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not context.args:
+        await message.reply_text("Usage: /rep @user")
+        return
+    target = context.args[0]
+    _cur.execute("SELECT COUNT(*) FROM vouches WHERE user=?", (target,))
+    count = _cur.fetchone()[0]
+    blacklisted, bl_reason = _is_blacklisted(target)
+    rank = _get_rank(count)
+    lines = [
+        f"👤 {target}",
+        f"⭐ Vouches Received: {count}",
+        f"🏆 Rank: {rank}",
+    ]
+    if blacklisted:
+        lines.append(f"🚫 Blacklisted - Reason: {bl_reason}")
+    else:
+        lines.append("✅ Good Standing")
+    _cur.execute(
+        "SELECT user, text, date FROM vouches WHERE from_user=? ORDER BY date DESC LIMIT 3",
+        (target.lstrip("@"),),
+    )
+    given_rows = _cur.fetchall()
+    lines.append("")
+    lines.append("📤 Recent Vouches Given (3 most recent):")
+    if given_rows:
+        for i, r in enumerate(given_rows, 1):
+            ts = r[2][:10] if r[2] else "N/A"
+            lines.append(f'{i}. → {r[0]}: "{r[1]}" [{ts}]')
+    else:
+        lines.append("None")
+    await message.reply_text("\n".join(lines))
+
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -538,6 +575,7 @@ async def post_init(application: Application) -> None:
         BotCommand("negvouch", "Broadcast a negative vouch (admin only)"),
         BotCommand("vouches", "View vouches for a user"),
         BotCommand("profile", "View a user's vouch profile"),
+        BotCommand("rep", "View user's reputation and recent vouch activity"),
         BotCommand("stats", "View your own vouch stats"),
         BotCommand("search", "Search vouches given and received by a user"),
         BotCommand("recent", "Last 5 vouches across all users"),
@@ -569,6 +607,7 @@ def run_bot() -> None:
     application.add_handler(CommandHandler("negvouch", negvouch))
     application.add_handler(CommandHandler("vouches", vouches_cmd))
     application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("rep", rep))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("recent", recent))
