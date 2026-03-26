@@ -519,6 +519,41 @@ async def groupinfo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text(
+        "📖 Vouch Bot — Command Reference\n\n"
+
+        "── Vouching ──\n"
+        "/vouch @user [message] — Vouch for a user (stored & broadcast)\n"
+        "/vouchanon @user [message] — Vouch anonymously\n"
+        "/removevouch @user — Remove your most recent vouch for a user\n"
+        "/unvouch @user reason — Broadcast a public unvouch\n"
+        "/negvouch @user reason — Broadcast a negative vouch (admin only)\n\n"
+
+        "── Profiles & Stats ──\n"
+        "/vouches @user — View all vouches for a user\n"
+        "/profile @user — View a user's full vouch profile\n"
+        "/stats — View your own vouch stats\n\n"
+
+        "── Discovery ──\n"
+        "/search @user — Search vouches given and received\n"
+        "/recent — Last 5 vouches across all users\n"
+        "/top — Top 10 most vouched users\n\n"
+
+        "── Moderation (admin only) ──\n"
+        "/blacklist @user reason — Blacklist a user\n"
+        "/unblacklist @user — Remove a user from the blacklist\n\n"
+
+        "── Group & Misc ──\n"
+        "/groupinfo — Export info about this group\n"
+        "/start — Welcome message\n"
+        "/help — Show this help message",
+    )
+
+
 async def on_reaction_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -531,6 +566,7 @@ async def on_reaction_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "Welcome message and command summary"),
+        BotCommand("help", "Show all commands and usage"),
         BotCommand("vouch", "Vouch for a user (stored + broadcast)"),
         BotCommand("vouchanon", "Vouch anonymously"),
         BotCommand("removevouch", "Remove your last vouch for a user"),
@@ -562,6 +598,7 @@ def run_bot() -> None:
         .build()
     )
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("vouch", vouch))
     application.add_handler(CommandHandler("vouchanon", vouchanon))
     application.add_handler(CommandHandler("removevouch", removevouch))
