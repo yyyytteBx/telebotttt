@@ -185,7 +185,7 @@ def _migrate_schema(db: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     # vouches: user/from_user/date -> user_key/from_user_key/created_at
     if _table_exists(cursor, "vouches"):
         cols = _table_columns(cursor, "vouches")
-            if "user" in cols and "user_key" not in cols:
+        if "user" in cols and "user_key" not in cols:
             cursor.execute("ALTER TABLE vouches RENAME TO vouches_legacy")
             _create_schema(cursor)
             cursor.execute("SELECT user, from_user, text, date FROM vouches_legacy")
