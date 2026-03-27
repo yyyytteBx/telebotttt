@@ -33,6 +33,11 @@ RANDOM_VOUCH_LINES = (
     "Smooth deal 🔥",
     "Trusted like WiFi 📶",
 )
+REACTION_LABELS = {
+    "legit": "👍",
+    "fire": "🔥",
+    "cap": "❌",
+}
 
 
 def _normalize_user_key(value: str | None) -> str:
@@ -160,6 +165,17 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
             created_at      TEXT NOT NULL,
             source_chat     TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id          INTEGER NOT NULL,
+            message_id       INTEGER NOT NULL,
+            reactor_user_key TEXT NOT NULL,
+            reaction         TEXT NOT NULL CHECK(reaction IN ('legit', 'fire', 'cap')),
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            UNIQUE(chat_id, message_id, reactor_user_key)
+        );
         """
     )
 
@@ -177,6 +193,8 @@ def _create_indexes(cursor: sqlite3.Cursor) -> None:
         CREATE INDEX IF NOT EXISTS idx_neg_vouches_created_at ON neg_vouches(created_at);
         CREATE INDEX IF NOT EXISTS idx_staff_logs_created_at ON staff_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_staff_logs_staff_action ON staff_logs(staff_user_key, action);
+        CREATE INDEX IF NOT EXISTS idx_message_reactions_message ON message_reactions(chat_id, message_id);
+        CREATE INDEX IF NOT EXISTS idx_message_reactions_reaction ON message_reactions(reaction);
         """
     )
 
@@ -567,6 +585,53 @@ def _rows_to_csv_bytes(rows: list[sqlite3.Row], headers: list[str]) -> bytes:
 def _rows_to_json_bytes(rows: list[sqlite3.Row], headers: list[str]) -> bytes:
     payload = [{h: row[h] for h in headers} for row in rows]
     return json.dumps(payload, indent=2).encode("utf-8")
+
+
+def _record_message_reaction(
+    chat_id: int,
+    message_id: int,
+    reactor_user_key: str,
+    reaction: str,
+) -> dict[str, int]:
+    if reaction not in REACTION_LABELS:
+        raise ValueError("Unsupported reaction type")
+
+    now = datetime.now().isoformat()
+    _cur.execute(
+        """
+        INSERT INTO message_reactions (
+            chat_id,
+            message_id,
+            reactor_user_key,
+            reaction,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, message_id, reactor_user_key)
+        DO UPDATE SET
+            reaction=excluded.reaction,
+            updated_at=excluded.updated_at
+        """,
+        (chat_id, message_id, reactor_user_key, reaction, now, now),
+    )
+
+    _cur.execute(
+        """
+        SELECT reaction, COUNT(*) AS c
+        FROM message_reactions
+        WHERE chat_id=? AND message_id=?
+        GROUP BY reaction
+        """,
+        (chat_id, message_id),
+    )
+    rows = _cur.fetchall()
+    _db.commit()
+
+    counts = {key: 0 for key in REACTION_LABELS}
+    for row in rows:
+        counts[str(row[0])] = int(row[1])
+    return counts
 
 
 async def _enforce_vouch_blacklist(
@@ -1624,8 +1689,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # Reaction buttons on regular vouches
-    reactions = {"legit": "👍 Legit!", "fire": "🔥 Fire!", "cap": "❌ Cap!"}
-    await query.answer(reactions.get(data, ""))
+    if data in REACTION_LABELS:
+        message = query.message
+        user = query.from_user
+        if message is None or user is None:
+            await query.answer("Unable to save reaction.", show_alert=True)
+            return
+
+        reactor_user_key = _normalize_user_key(user.username) if user.username else f"id:{user.id}"
+        if not reactor_user_key:
+            await query.answer("Unable to identify user for reaction.", show_alert=True)
+            return
+
+        counts = _record_message_reaction(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+            reactor_user_key=reactor_user_key,
+            reaction=data,
+        )
+        summary = " ".join(
+            f"{REACTION_LABELS[key]} {counts.get(key, 0)}" for key in ("legit", "fire", "cap")
+        )
+        await query.answer(f"Saved {REACTION_LABELS[data]} | {summary}")
+        return
+
+    await query.answer()
 
 
 async def _handle_anon_vouch_callback(
