@@ -62,6 +62,12 @@ def _display_user_key(user_key: str) -> str:
     return user_key if user_key else "unknown"
 
 
+def _display_vouch_actor(from_user_key: str, is_anonymous: int) -> str:
+    if int(is_anonymous or 0) == 1:
+        return "anonymous"
+    return _display_user_key(from_user_key)
+
+
 def _get_actor_user_key(update: Update) -> str:
     user = update.effective_user
     if user is None:
@@ -104,7 +110,8 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
             user_key      TEXT NOT NULL,
             from_user_key TEXT NOT NULL,
             text          TEXT NOT NULL,
-            created_at    TEXT NOT NULL
+            created_at    TEXT NOT NULL,
+            is_anonymous  INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS limits (
@@ -178,7 +185,7 @@ def _migrate_schema(db: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
     # vouches: user/from_user/date -> user_key/from_user_key/created_at
     if _table_exists(cursor, "vouches"):
         cols = _table_columns(cursor, "vouches")
-        if "user" in cols and "user_key" not in cols:
+            if "user" in cols and "user_key" not in cols:
             cursor.execute("ALTER TABLE vouches RENAME TO vouches_legacy")
             _create_schema(cursor)
             cursor.execute("SELECT user, from_user, text, date FROM vouches_legacy")
@@ -293,6 +300,7 @@ def _migrate_schema(db: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             cursor.execute("DROP TABLE anon_vouch_pending_legacy")
 
     # Make sure newly added anon decision columns exist for existing DBs
+    _ensure_column(cursor, "vouches", "is_anonymous", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(cursor, "anon_vouch_pending", "decision_reason", "TEXT")
     _ensure_column(cursor, "anon_vouch_pending", "decided_by", "TEXT")
     _ensure_column(cursor, "anon_vouch_pending", "decided_at", "TEXT")
@@ -493,8 +501,8 @@ async def _handle_anon_decision(
 
     if decision == "approved":
         _cur.execute(
-            "INSERT INTO vouches (user_key, from_user_key, text, created_at) VALUES (?, ?, ?, ?)",
-            (target, "anonymous", text, now),
+            "INSERT INTO vouches (user_key, from_user_key, text, created_at, is_anonymous) VALUES (?, ?, ?, ?, ?)",
+            (target, real_from, text, now, 1),
         )
 
     _db.commit()
@@ -588,6 +596,11 @@ async def _ensure_chat_allowed(update: Update) -> bool:
     if chat is None:
         return False
 
+    user = update.effective_user
+    admin_id = _get_admin_id()
+    if chat.type == "private" and admin_id is not None and user is not None and user.id == admin_id:
+        return True
+
     if ALLOWED_CHAT_IDS is None or chat.id in ALLOWED_CHAT_IDS:
         return True
 
@@ -676,8 +689,11 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
     if chat is None or user is None:
         return False
-    if chat.type == "private":
+    configured_admin_id = _get_admin_id()
+    if configured_admin_id is not None and user.id == configured_admin_id:
         return True
+    if chat.type == "private":
+        return False
     member = await context.bot.get_chat_member(chat.id, user.id)
     return member.status in ("administrator", "creator")
 
@@ -780,21 +796,21 @@ async def vouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _enforce_vouch_blacklist(message, from_user_key, target):
         return
 
-    if not _can_vouch(from_user_key):
-        await message.reply_text("❌ Daily vouch limit reached (3)")
-        return
-
     if _on_cooldown(from_user_key, target):
         await message.reply_text(
             f"⏱️ You already vouched for {_display_user_key(target)} in the last {VOUCH_COOLDOWN_HOURS}h"
         )
         return
 
+    if not _can_vouch(from_user_key):
+        await message.reply_text("❌ Daily vouch limit reached (3)")
+        return
+
     text = " ".join(context.args[1:]).strip() or random.choice(RANDOM_VOUCH_LINES)
 
     _cur.execute(
-        "INSERT INTO vouches (user_key, from_user_key, text, created_at) VALUES (?, ?, ?, ?)",
-        (target, from_user_key, text, datetime.now().isoformat()),
+        "INSERT INTO vouches (user_key, from_user_key, text, created_at, is_anonymous) VALUES (?, ?, ?, ?, ?)",
+        (target, from_user_key, text, datetime.now().isoformat(), 0),
     )
     _db.commit()
 
@@ -861,6 +877,10 @@ async def vouchanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text(
             f"⏱️ You already vouched for {_display_user_key(target)} in the last {VOUCH_COOLDOWN_HOURS}h"
         )
+        return
+
+    if not _can_vouch(from_user_key):
+        await message.reply_text("❌ Daily vouch limit reached (3)")
         return
 
     text = " ".join(context.args[1:]).strip() or random.choice(RANDOM_VOUCH_LINES)
@@ -1066,8 +1086,8 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     query_map: dict[str, tuple[str, list[str]]] = {
         "vouches": (
-            "SELECT id, user_key, from_user_key, text, created_at FROM vouches ORDER BY created_at DESC",
-            ["id", "user_key", "from_user_key", "text", "created_at"],
+            "SELECT id, user_key, from_user_key, text, created_at, is_anonymous FROM vouches ORDER BY created_at DESC",
+            ["id", "user_key", "from_user_key", "text", "created_at", "is_anonymous"],
         ),
         "negvouches": (
             "SELECT id, user_key, from_user_key, reason, created_at, source_chat FROM neg_vouches ORDER BY created_at DESC",
@@ -1161,7 +1181,57 @@ async def removevouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def unvouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _broadcast_vouch(update, context, "unvouch", "Unvouch")
+    message = update.effective_message
+    if message is None:
+        return
+    if not await _ensure_chat_allowed(update):
+        return
+    if not context.args:
+        await message.reply_text("Usage: /unvouch @username reason")
+        return
+
+    from_user_key = _get_actor_user_key(update)
+    try:
+        target_user_key = _normalize_target_arg(context.args[0])
+    except ValueError:
+        await message.reply_text("Usage: /unvouch @username reason")
+        return
+
+    if from_user_key == target_user_key:
+        await message.reply_text("❌ You cannot unvouch yourself.")
+        return
+
+    reason = " ".join(context.args[1:]).strip() or "No reason provided"
+    _cur.execute(
+        "DELETE FROM vouches WHERE id = ("
+        "  SELECT id FROM vouches WHERE user_key=? AND from_user_key=? ORDER BY created_at DESC LIMIT 1"
+        ")",
+        (target_user_key, from_user_key),
+    )
+    _db.commit()
+
+    if not _cur.rowcount:
+        await message.reply_text(
+            f"No stored vouch from you to {_display_user_key(target_user_key)} was found to reverse."
+        )
+        return
+
+    actor = _build_actor_name(update)
+    source_chat = _build_source_chat(update)
+    await context.bot.send_message(
+        chat_id=_get_broadcast_chat_id(),
+        text=(
+            "Unvouch\n"
+            f"Target: {_display_user_key(target_user_key)}\n"
+            f"From: {actor}\n"
+            f"Reason: {reason}\n"
+            f"Source chat: {source_chat}\n"
+            "Result: latest stored vouch removed"
+        ),
+    )
+    await message.reply_text(
+        f"✅ Unvouch complete. Latest stored vouch to {_display_user_key(target_user_key)} was removed."
+    )
 
 
 async def negvouch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1325,14 +1395,17 @@ async def vouches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except ValueError:
         await message.reply_text("Usage: /vouches @user")
         return
-    _cur.execute("SELECT from_user_key, text FROM vouches WHERE user_key=?", (target,))
+    _cur.execute(
+        "SELECT from_user_key, text, is_anonymous FROM vouches WHERE user_key=?",
+        (target,),
+    )
     rows = _cur.fetchall()
     if not rows:
         await message.reply_text("No vouches yet.")
         return
     msg = f"📜 Vouches for {_display_user_key(target)}:\n\n"
     for r in rows[-10:]:
-        msg += f"{_display_user_key(r[0])}: {r[1]}\n"
+        msg += f"{_display_vouch_actor(r[0], r[2])}: {r[1]}\n"
     await message.reply_text(msg)
 
 
@@ -1402,15 +1475,21 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except ValueError:
         await message.reply_text("Usage: /search @user")
         return
-    _cur.execute("SELECT from_user_key, text FROM vouches WHERE user_key=?", (target,))
+    _cur.execute(
+        "SELECT from_user_key, text, is_anonymous FROM vouches WHERE user_key=?",
+        (target,),
+    )
     received = _cur.fetchall()
-    _cur.execute("SELECT user_key, text FROM vouches WHERE from_user_key=?", (target,))
+    _cur.execute(
+        "SELECT user_key, text FROM vouches WHERE from_user_key=? AND is_anonymous=0",
+        (target,),
+    )
     given = _cur.fetchall()
     parts = [f"🔍 Search results for {_display_user_key(target)}"]
     if received:
         parts.append(f"\n📥 Received ({len(received)}):")
         for r in received[-5:]:
-            parts.append(f"  {_display_user_key(r[0])}: {r[1]}")
+            parts.append(f"  {_display_vouch_actor(r[0], r[2])}: {r[1]}")
     else:
         parts.append("\n📥 Received: none")
     if given:
@@ -1429,7 +1508,7 @@ async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _ensure_chat_allowed(update):
         return
     _cur.execute(
-        "SELECT from_user_key, user_key, text, created_at FROM vouches ORDER BY created_at DESC LIMIT 5"
+        "SELECT from_user_key, user_key, text, created_at, is_anonymous FROM vouches ORDER BY created_at DESC LIMIT 5"
     )
     rows = _cur.fetchall()
     if not rows:
@@ -1438,7 +1517,7 @@ async def recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = "📌 Recent Vouches:\n\n"
     for r in rows:
         ts = r[3][:10]
-        msg += f"{_display_user_key(r[0])} → {_display_user_key(r[1])}: {r[2]} [{ts}]\n"
+        msg += f"{_display_vouch_actor(r[0], r[4])} → {_display_user_key(r[1])}: {r[2]} [{ts}]\n"
     await message.reply_text(msg)
 
 
@@ -1617,7 +1696,7 @@ async def post_init(application: Application) -> None:
         BotCommand("approveanon", "Approve anon vouch with a reason (admin only)"),
         BotCommand("rejectanon", "Reject anon vouch with a reason (admin only)"),
         BotCommand("removevouch", "Remove your last vouch for a user"),
-        BotCommand("unvouch", "Broadcast an unvouch"),
+        BotCommand("unvouch", "Reverse your latest stored vouch for a user"),
         BotCommand("negvouch", "Store + broadcast a negative vouch (admin only)"),
         BotCommand("vouches", "View vouches for a user"),
         BotCommand("profile", "View NTN-style profile with rep score"),
