@@ -670,6 +670,13 @@ def _get_vouch_for_confirmation(vouch_id: int) -> sqlite3.Row | None:
     return _cur.fetchone()
 
 
+def _describe_staff_action(action: str) -> str:
+    legacy_actions = {"negvouch", "resolve_negvouch", "anon_approved", "anon_rejected"}
+    if action in legacy_actions:
+        return f"{action} [legacy]"
+    return action
+
+
 def _get_pending_negvouch(negvouch_id: int) -> sqlite3.Row | None:
     _cur.execute(
         """
@@ -1426,7 +1433,12 @@ async def stafflogs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         limit = max(1, min(50, int(context.args[0])))
 
     _cur.execute(
-        "SELECT staff_user_key, action, target_user_key, reason, created_at FROM staff_logs ORDER BY created_at DESC LIMIT ?",
+        """
+        SELECT id, staff_user_key, action, target_user_key, reason, details, created_at, source_chat
+        FROM staff_logs
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
         (limit,),
     )
     rows = _cur.fetchall()
@@ -1434,14 +1446,17 @@ async def stafflogs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await message.reply_text("No staff logs yet.")
         return
 
-    lines = ["🧾 Staff/Admin Logs", ""]
+    lines = ["🧾 Staff/Admin Logs", "Legacy actions are labeled explicitly.", ""]
     for row in rows:
         lines.append(
-            f"[{row['created_at'][:16]}] {_display_user_key(row['staff_user_key'])} -> {row['action']} "
-            f"target={_display_user_key(row['target_user_key'] or '')}"
+            f"#{row['id']} [{row['created_at'][:16]}] {_display_user_key(row['staff_user_key'])} -> "
+            f"{_describe_staff_action(str(row['action']))}"
         )
-        if row["reason"]:
-            lines.append(f"reason: {row['reason']}")
+        lines.append(f"target={_display_user_key(row['target_user_key'] or '')}")
+        lines.append(f"reason={row['reason'] or 'none'}")
+        lines.append(f"details={row['details'] or 'none'}")
+        lines.append(f"source={row['source_chat'] or 'unknown'}")
+        lines.append("")
     await message.reply_text("\n".join(lines))
 
 
