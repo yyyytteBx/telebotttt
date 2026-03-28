@@ -21,7 +21,8 @@ For a full implementation-level reference, see [`BOT_DOCUMENTATION.md`](./BOT_DO
 - Python 3.11+ recommended
 - a Telegram bot token
 - at least one Telegram admin user ID
-- one or more allowed chat IDs for normal usage
+
+Note: the bot validates configuration at startup and exits early if required values are missing or malformed.
 
 ## Install
 
@@ -52,6 +53,15 @@ Create a `.env` file in the project root and configure the bot with environment 
 - The configured broadcast chat is always allowed automatically.
 - If `TELEGRAM_BROADCAST_CHAT_ID` is not set, the default broadcast chat ID is `-1003744224655`.
 
+### Startup validation behavior
+
+- `TELEGRAM_BOT_TOKEN` must be present.
+- At least one admin must be configured (`TELEGRAM_ADMIN_USER_IDS` or `TELEGRAM_ADMIN_USER_ID`).
+- `TELEGRAM_ADMIN_USER_IDS` must contain valid integer user IDs.
+- `TELEGRAM_ADMIN_USER_ID` must be an integer when set.
+- `TELEGRAM_BROADCAST_CHAT_ID` must be an integer when set.
+- `TELEGRAM_ALLOWED_CHAT_IDS` must contain comma-separated integer chat IDs when set.
+
 ## Minimal `.env` example
 
 ```dotenv
@@ -72,6 +82,7 @@ python bot.py
 ### Community commands
 
 - `/start`
+- `/help`
 - `/vouch @user reason`
 - `/vouchanon @user reason`
 - `/removevouch @user`

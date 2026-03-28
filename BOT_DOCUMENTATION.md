@@ -113,6 +113,8 @@ A dedicated broadcast chat is used for public or staff-visible event messages. T
 
 That broadcast chat is implicitly allowed by the central chat-allow check.
 
+The code also contains a small hardcoded operational allowlist (`ALWAYS_ALLOWED_CHAT_IDS`) for fixed chats.
+
 ---
 
 ## 5. Configuration
@@ -122,6 +124,8 @@ The bot is configured through environment variables.
 ### Required
 #### `TELEGRAM_BOT_TOKEN`
 Telegram bot token used to connect and run polling.
+
+At startup, the bot also requires at least one configured admin from `TELEGRAM_ADMIN_USER_IDS` or `TELEGRAM_ADMIN_USER_ID`.
 
 ### Important optional configuration
 #### `TELEGRAM_ALLOWED_CHAT_IDS`
@@ -137,11 +141,17 @@ Broadcast chat for logs, vouches, and status messages.
 If unset, the bot uses the built-in default:
 - `-1003744224655`
 
+If set, this value must be a valid integer chat ID.
+
 #### `TELEGRAM_ADMIN_USER_IDS`
 Comma-separated Telegram user IDs for configured admins.
 
+If set, each item must be a valid integer user ID.
+
 #### `TELEGRAM_ADMIN_USER_ID`
 Single admin user ID. This is supported alongside the multi-admin variable.
+
+If set, this value must be a valid integer user ID.
 
 ### Dotenv behavior
 The bot loads env values from:
@@ -163,15 +173,20 @@ A chat is allowed when:
 - it is a private chat and the user is a configured admin.
 
 ### 6.2 Admin privileges
-Admin behavior is checked in two ways depending on the feature:
-- **configured admin IDs** via `_is_configured_admin_id()`
-- **chat admins/creators** via `_is_admin()`
+Admin behavior is centralized by helper guards:
+- `_require_configured_admin()` for configured-admin-only actions
+- `_require_group_or_configured_admin()` for actions allowed to chat admins or configured admins
 
 `_is_admin()` treats a user as admin if:
 - their Telegram user ID is in configured admin IDs, or
 - they are a Telegram admin/creator in a non-private chat.
 
 This means some features are restricted to configured admins only, while others are available to chat admins too.
+
+### 6.3 Guard mapping (current behavior)
+- **Configured-admin only:** `/pending_vouches`, `/approveanon`, `/rejectanon`, `/stafflogs`, `/export`, and anonymous approve/reject callbacks.
+- **Group admin or configured admin:** `/neg`, `/negvouch`, `/resolve`, `/resolvenegvouch`, `/blacklist`, `/unblacklist`.
+- **Allowed-chat users:** regular community commands such as `/vouch`, `/profile`, `/leaderboard`, `/top`, `/search`, and `/recent`.
 
 ---
 
@@ -253,6 +268,9 @@ When a user reaches `20` total vouches, the bot announces an elite-rank message 
 
 ### `/start`
 Shows a short welcome/help message.
+
+### `/help`
+Shows a detailed in-chat guide that explains command usage, permissions, and behavior. Long output is split across multiple messages automatically.
 
 ### `/vouch @user message`
 Creates a positive vouch.
@@ -517,12 +535,13 @@ This suggests the project intends to support a richer moderation/case workflow f
 ### Startup
 On startup, the bot:
 1. loads environment variables,
-2. opens the SQLite database,
-3. migrates schema if needed,
-4. syncs `user_stats`,
-5. registers Telegram command descriptions,
-6. sends an online/loading-style message to the broadcast chat,
-7. starts polling.
+2. validates startup configuration (token/admin IDs/chat ID formats),
+3. opens the SQLite database,
+4. migrates schema if needed,
+5. syncs `user_stats`,
+6. registers Telegram command descriptions,
+7. sends an online/loading-style message to the broadcast chat,
+8. starts polling.
 
 ### Polling model
 The bot uses long polling rather than webhooks.
@@ -583,7 +602,7 @@ These are not necessarily failures, but they are relevant to understanding the p
 
 - The entire application lives in one large `bot.py`, which makes future maintenance harder.
 - Negative-vouch workflow appears only partially migrated to the dedicated `neg_vouches` table.
-- Access control style is mixed between configured-admin-only checks and general Telegram admin checks.
+- Access control policy is centralized through shared guard helpers, but still intentionally mixed between configured-admin-only and group-admin-capable actions.
 - SQLite is used through a global connection/cursor, which is simple but may become harder to scale or reason about under heavy concurrency.
 - Setup documentation in the original `README.md` is minimal.
 
