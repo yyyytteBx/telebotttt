@@ -518,7 +518,18 @@ def _get_rank(score: int) -> str:
 
 def _calculate_trust_score(confirmed: int, total: int, neg: int) -> int:
     unconfirmed = max(total - confirmed, 0)
-    return (confirmed * 3) + (unconfirmed * 1) - (neg * 4)
+    score = (confirmed * 3) + (unconfirmed * 1) - (neg * 4)
+    if neg >= 3:
+        score -= 5
+    return score
+
+
+def _get_risk_label(neg: int) -> str:
+    if neg >= 2:
+        return "⚠️ Risk"
+    if neg == 0:
+        return "🔒 Clean"
+    return "👀 Review"
 
 
 def _can_vouch(user: str) -> bool:
@@ -682,6 +693,7 @@ def _build_profile_card(
 ) -> str:
     badge = "NTN VERIFIED" if trust_score >= 5 and not blacklisted else "NTN WATCH"
     rank = _get_rank(trust_score)
+    risk_label = _get_risk_label(neg_vouches)
     score_icon = "🟢" if trust_score >= 0 else "🔴"
     card = [
         "┏━━━━━━━━━━━━━━━━━━━━━━━┓",
@@ -693,6 +705,7 @@ def _build_profile_card(
         f"✅ Confirmed: {confirmed_vouches}",
         f"📉 Negative: {neg_vouches}",
         f"{score_icon} Trust Score: {trust_score}",
+        f"🧠 Risk: {risk_label}",
         f"🏅 Rank: {rank}",
     ]
     if blacklisted:
@@ -926,8 +939,7 @@ async def _ensure_chat_allowed(update: Update) -> bool:
         return False
 
     user = update.effective_user
-    admin_id = _get_admin_id()
-    if chat.type == "private" and admin_id is not None and user is not None and user.id == admin_id:
+    if chat.type == "private" and user is not None and _is_configured_admin_id(user.id):
         return True
 
     if chat.id in ALLOWED_CHAT_IDS:
@@ -946,14 +958,37 @@ async def _ensure_chat_allowed(update: Update) -> bool:
     return False
 
 
+def _get_admin_ids() -> set[int]:
+    values: set[int] = set()
+
+    raw_multi = os.getenv("TELEGRAM_ADMIN_USER_IDS", "").strip()
+    if raw_multi:
+        for token in raw_multi.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                values.add(int(token))
+            except ValueError:
+                continue
+
+    raw_single = os.getenv("TELEGRAM_ADMIN_USER_ID", "").strip()
+    if raw_single:
+        try:
+            values.add(int(raw_single))
+        except ValueError:
+            pass
+
+    return values
+
+
 def _get_admin_id() -> int | None:
-    raw = os.getenv("TELEGRAM_ADMIN_USER_ID")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+    admin_ids = _get_admin_ids()
+    return next(iter(admin_ids), None)
+
+
+def _is_configured_admin_id(user_id: int) -> bool:
+    return user_id in _get_admin_ids()
 
 
 # ---------------- BROADCAST HELPERS ----------------
@@ -1018,8 +1053,7 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
     if chat is None or user is None:
         return False
-    configured_admin_id = _get_admin_id()
-    if configured_admin_id is not None and user.id == configured_admin_id:
+    if _is_configured_admin_id(user.id):
         return True
     if chat.type == "private":
         return False
@@ -1247,26 +1281,27 @@ async def vouchanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     vouch_id = _cur.lastrowid
 
     # Send DM to admin with approve/reject buttons
-    admin_id = _get_admin_id()
-    if admin_id:
+    admin_ids = _get_admin_ids()
+    if admin_ids:
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Approve", callback_data=f"anon_approve:{vouch_id}:approved_by_admin_dm"),
             InlineKeyboardButton("❌ Reject", callback_data=f"anon_reject:{vouch_id}:rejected_by_admin_dm"),
         ]])
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    f"🔔 Pending Anonymous Vouch\n\n"
-                    f"Target: {_display_user_key(target)}\n"
-                    f"From: {_display_user_key(from_user_key)}\n"
-                    f"Message: {text}\n"
-                    f"Vouch ID: #{vouch_id}"
-                ),
-                reply_markup=keyboard,
-            )
-        except Exception:
-            pass
+        for admin_id in admin_ids:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"🔔 Pending Anonymous Vouch\n\n"
+                        f"Target: {_display_user_key(target)}\n"
+                        f"From: {_display_user_key(from_user_key)}\n"
+                        f"Message: {text}\n"
+                        f"Vouch ID: #{vouch_id}"
+                    ),
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                pass
 
     await message.reply_text(
         "✅ Your anonymous vouch has been submitted for admin review.\n"
@@ -1282,8 +1317,7 @@ async def pending_vouches(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _ensure_chat_allowed(update):
         return
 
-    admin_id = _get_admin_id()
-    if admin_id is not None and user.id != admin_id:
+    if not _is_configured_admin_id(user.id):
         await message.reply_text("❌ This command is for admins only.")
         return
 
@@ -1319,8 +1353,7 @@ async def approveanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not await _ensure_chat_allowed(update):
         return
-    admin_id = _get_admin_id()
-    if admin_id is not None and user.id != admin_id:
+    if not _is_configured_admin_id(user.id):
         await message.reply_text("❌ This command is for admins only.")
         return
 
@@ -1352,8 +1385,7 @@ async def rejectanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     if not await _ensure_chat_allowed(update):
         return
-    admin_id = _get_admin_id()
-    if admin_id is not None and user.id != admin_id:
+    if not _is_configured_admin_id(user.id):
         await message.reply_text("❌ This command is for admins only.")
         return
 
@@ -1385,8 +1417,7 @@ async def stafflogs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
-    admin_id = _get_admin_id()
-    if admin_id is not None and user.id != admin_id:
+    if not _is_configured_admin_id(user.id):
         await message.reply_text("❌ This command is for admins only.")
         return
 
@@ -1421,8 +1452,7 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not await _ensure_chat_allowed(update):
         return
-    admin_id = _get_admin_id()
-    if admin_id is not None and user.id != admin_id:
+    if not _is_configured_admin_id(user.id):
         await message.reply_text("❌ This command is for admins only.")
         return
 
@@ -2148,6 +2178,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🔒 Confirmed received: {int(stats_row['confirmed_vouches'])}\n"
         f"❌ Negative received: {int(stats_row['neg_vouches'])}\n"
         f"⚖️ Trust score: {int(stats_row['trust_score'])}\n"
+        f"🧠 Risk: {_get_risk_label(int(stats_row['neg_vouches']))}\n"
         f"🏆 Rank: {_get_rank(int(stats_row['trust_score']))}"
     )
 
@@ -2255,7 +2286,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     out = ["🏁 Reputation Leaderboard", ""]
     for i, row in enumerate(rows, 1):
         out.append(
-            f"{i}. {_display_user_key(row['username'])} | total {row['total_vouches']} | confirmed {row['confirmed_vouches']} | neg {row['neg_vouches']} | score {row['trust_score']}"
+            f"{i}. {_display_user_key(row['username'])} | total {row['total_vouches']} | confirmed {row['confirmed_vouches']} | neg {row['neg_vouches']} | score {row['trust_score']} | {_get_risk_label(int(row['neg_vouches']))}"
         )
     await message.reply_text("\n".join(out))
 
@@ -2391,8 +2422,7 @@ async def _handle_anon_vouch_callback(
         return
 
     user = update.effective_user
-    admin_id = _get_admin_id()
-    if admin_id is not None and (user is None or user.id != admin_id):
+    if user is None or not _is_configured_admin_id(user.id):
         await query.answer("❌ Only the admin can approve or reject vouches.")
         return
 
