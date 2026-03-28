@@ -16,7 +16,7 @@ load_dotenv()
 load_dotenv(os.path.join('.venv', '.env'))
 
 
-DEFAULT_BROADCAST_CHAT_ID = -1003305030576
+DEFAULT_BROADCAST_CHAT_ID = -1003744224655
 VOUCH_COOLDOWN_HOURS = 24
 ELITE_THRESHOLD = 20
 ONLINE_NOW_MESSAGES = (
@@ -949,7 +949,7 @@ async def _ensure_chat_allowed(update: Update) -> bool:
     if chat.type == "private" and user is not None and _is_configured_admin_id(user.id):
         return True
 
-    if chat.id in ALLOWED_CHAT_IDS:
+    if chat.id in ALLOWED_CHAT_IDS or chat.id == _get_broadcast_chat_id():
         return True
 
     message = update.effective_message
