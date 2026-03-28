@@ -982,15 +982,17 @@ def _get_admin_ids() -> set[int]:
                 continue
             try:
                 values.add(int(token))
-            except ValueError:
-                continue
+            except ValueError as error:
+                raise RuntimeError(
+                    "TELEGRAM_ADMIN_USER_IDS must contain comma-separated integer user IDs."
+                ) from error
 
     raw_single = os.getenv("TELEGRAM_ADMIN_USER_ID", "").strip()
     if raw_single:
         try:
             values.add(int(raw_single))
-        except ValueError:
-            pass
+        except ValueError as error:
+            raise RuntimeError("TELEGRAM_ADMIN_USER_ID must be an integer user ID.") from error
 
     return values
 
@@ -1023,9 +1025,22 @@ def _get_required_token() -> str:
 
 def _get_broadcast_chat_id() -> int:
     raw_chat_id = os.getenv("TELEGRAM_BROADCAST_CHAT_ID")
-    if raw_chat_id is None:
+    if raw_chat_id is None or not raw_chat_id.strip():
         return DEFAULT_BROADCAST_CHAT_ID
-    return int(raw_chat_id)
+    try:
+        return int(raw_chat_id.strip())
+    except ValueError as error:
+        raise RuntimeError("TELEGRAM_BROADCAST_CHAT_ID must be an integer chat ID.") from error
+
+
+def _validate_startup_config() -> None:
+    _get_required_token()
+    _parse_allowed_chat_ids()
+    _get_broadcast_chat_id()
+    if not _get_admin_ids():
+        raise RuntimeError(
+            "Configure at least one admin using TELEGRAM_ADMIN_USER_IDS or TELEGRAM_ADMIN_USER_ID."
+        )
 
 
 def _build_online_now_message(bot_name: str) -> str:
@@ -1077,6 +1092,38 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return member.status in ("administrator", "creator")
 
 
+async def _deny_access(update: Update, message_text: str) -> None:
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(message_text)
+        return
+    query = update.callback_query
+    if query is not None:
+        await query.answer(message_text, show_alert=True)
+
+
+async def _require_configured_admin(
+    update: Update,
+    denied_text: str = "❌ This command is for admins only.",
+) -> bool:
+    user = update.effective_user
+    if user is not None and _is_configured_admin_id(user.id):
+        return True
+    await _deny_access(update, denied_text)
+    return False
+
+
+async def _require_group_or_configured_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    denied_text: str = "❌ Only group admins can use this command.",
+) -> bool:
+    if await _is_admin(update, context):
+        return True
+    await _deny_access(update, denied_text)
+    return False
+
+
 async def _broadcast_vouch(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1089,8 +1136,7 @@ async def _broadcast_vouch(
         return
     if not await _ensure_chat_allowed(update):
         return
-    if admin_only and not await _is_admin(update, context):
-        await message.reply_text("❌ Only group admins can use this command.")
+    if admin_only and not await _require_group_or_configured_admin(update, context):
         return
     try:
         request = _parse_vouch_request(command_name, action_label, context)
@@ -1133,6 +1179,104 @@ async def _broadcast_vouch(
     )
 
 
+def _build_help_text() -> str:
+    return (
+        "📘 Vouch Bot Command Guide\n\n"
+        "This guide explains what each command does, who can use it, and common usage.\n\n"
+        "General commands\n"
+        "/start\n"
+        "Shows a quick introduction and command summary.\n\n"
+        "/help\n"
+        "Shows this full help guide with detailed explanations for every command.\n\n"
+        "/vouch @user reason\n"
+        "Adds a positive vouch. The vouch is stored, broadcast, and sent with a confirm button.\n"
+        "Rules: no self-vouch, blacklist checks, per-target cooldown, and daily limit.\n\n"
+        "/vouchanon @user reason\n"
+        "Submits an anonymous vouch for admin review. Nothing is broadcast until approved.\n"
+        "If approved, it is posted as an anonymous vouch and affects trust stats.\n\n"
+        "/removevouch @user\n"
+        "Removes your latest stored vouch for that user.\n\n"
+        "/unvouch @user reason\n"
+        "Removes your latest stored vouch for that user and broadcasts an unvouch event with your reason.\n\n"
+        "/vouches @user\n"
+        "Shows recent vouches received by the target user.\n\n"
+        "/profile @user\n"
+        "Shows a profile card with total, confirmed, negatives, trust score, risk, rank, and blacklist status.\n\n"
+        "/stats\n"
+        "Shows your own contribution and reputation stats.\n\n"
+        "/search @user\n"
+        "Shows both received and given vouches tied to the target user key.\n\n"
+        "/recent\n"
+        "Shows the latest vouches recorded across the bot.\n\n"
+        "/top\n"
+        "Shows top users ranked by trust score.\n\n"
+        "/leaderboard\n"
+        "Shows a detailed trust leaderboard with totals, confirmed, negatives, score, and risk labels.\n\n"
+        "/groupinfo\n"
+        "Shows metadata for the current Telegram chat (title, id, members, description, etc.).\n\n"
+        "Moderation/admin commands\n"
+        "/neg @user reason\n"
+        "Adds a negative vouch entry. Admin-only. Applies negative trust impact until resolved.\n\n"
+        "/negvouch\n"
+        "Alias for /neg. Same behavior and permissions.\n\n"
+        "/resolve @user [note]\n"
+        "Resolves all unresolved negative vouches for a user. Admin-only.\n\n"
+        "/resolvenegvouch\n"
+        "Alias for /resolve. Same behavior and permissions.\n\n"
+        "/flag @user note\n"
+        "Posts a review warning/flag message and logs staff action details.\n\n"
+        "/pending_vouches\n"
+        "Lists pending anonymous vouches awaiting decision. Configured-admin only.\n\n"
+        "/approveanon <vouch_id> reason\n"
+        "Approves a pending anonymous vouch and broadcasts it. Configured-admin only.\n\n"
+        "/rejectanon <vouch_id> reason\n"
+        "Rejects a pending anonymous vouch and records decision reason. Configured-admin only.\n\n"
+        "/blacklist @user reason\n"
+        "Adds or updates a blacklist record. Blacklisted users cannot vouch. Admin-only.\n\n"
+        "/unblacklist @user\n"
+        "Removes a user from blacklist. Admin-only.\n\n"
+        "/stafflogs [limit]\n"
+        "Shows recent staff actions. Limit defaults to 15 and caps at 50. Configured-admin only.\n\n"
+        "/export <vouches|negvouches|blacklist|anon|stafflogs> <csv|json>\n"
+        "Exports selected dataset as a file for audit/review. Configured-admin only.\n\n"
+        "Chat access rules\n"
+        "Commands only work in allowed chats, the broadcast chat, or configured-admin private chat."
+    )
+
+
+async def _reply_long_text(message: Any, text: str, chunk_size: int = 3800) -> None:
+    if len(text) <= chunk_size:
+        await message.reply_text(text)
+        return
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= chunk_size:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n\n", 0, chunk_size)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, chunk_size)
+        if split_at == -1:
+            split_at = chunk_size
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+
+    for chunk in chunks:
+        if chunk:
+            await message.reply_text(chunk)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    if not await _ensure_chat_allowed(update):
+        return
+    await _reply_long_text(message, _build_help_text())
+
+
 # ---------------- COMMANDS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
@@ -1157,7 +1301,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/stats\n"
         "/groupinfo\n\n"
         "Admin: /resolvenegvouch <case_id> resolution\n\n"
-        "Use /search @user for more details."
+        "Use /search @user for more details.\n"
+        "Use /help for the full command guide."
     )
 
 
@@ -1333,8 +1478,7 @@ async def pending_vouches(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _ensure_chat_allowed(update):
         return
 
-    if not _is_configured_admin_id(user.id):
-        await message.reply_text("❌ This command is for admins only.")
+    if not await _require_configured_admin(update):
         return
 
     _cur.execute(
@@ -1369,8 +1513,7 @@ async def approveanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not _is_configured_admin_id(user.id):
-        await message.reply_text("❌ This command is for admins only.")
+    if not await _require_configured_admin(update):
         return
 
     if not context.args or not context.args[0].isdigit() or len(context.args) < 2:
@@ -1401,8 +1544,7 @@ async def rejectanon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not _is_configured_admin_id(user.id):
-        await message.reply_text("❌ This command is for admins only.")
+    if not await _require_configured_admin(update):
         return
 
     if not context.args or not context.args[0].isdigit() or len(context.args) < 2:
@@ -1433,8 +1575,7 @@ async def stafflogs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not _is_configured_admin_id(user.id):
-        await message.reply_text("❌ This command is for admins only.")
+    if not await _require_configured_admin(update):
         return
 
     limit = 15
@@ -1476,8 +1617,7 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not _is_configured_admin_id(user.id):
-        await message.reply_text("❌ This command is for admins only.")
+    if not await _require_configured_admin(update):
         return
 
     if len(context.args) < 2:
@@ -1708,8 +1848,7 @@ async def resolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not await _is_admin(update, context):
-        await message.reply_text("❌ Only group admins can use this command.")
+    if not await _require_group_or_configured_admin(update, context):
         return
     if not context.args:
         await message.reply_text("Usage: /resolve @user [note]")
@@ -1821,8 +1960,7 @@ async def neg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not await _is_admin(update, context):
-        await message.reply_text("❌ Only group admins can use this command.")
+    if not await _require_group_or_configured_admin(update, context):
         return
     if len(context.args) < 2:
         await message.reply_text("Usage: /neg @user reason")
@@ -1874,8 +2012,7 @@ async def blacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not await _is_admin(update, context):
-        await message.reply_text("❌ Only group admins can use this command.")
+    if not await _require_group_or_configured_admin(update, context):
         return
     if not context.args or len(context.args) < 2:
         await message.reply_text("Usage: /blacklist @user reason")
@@ -1927,8 +2064,7 @@ async def unblacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not await _ensure_chat_allowed(update):
         return
-    if not await _is_admin(update, context):
-        await message.reply_text("❌ Only group admins can use this command.")
+    if not await _require_group_or_configured_admin(update, context):
         return
     if not context.args:
         await message.reply_text("Usage: /unblacklist @user")
@@ -2282,9 +2418,10 @@ async def _handle_anon_vouch_callback(
     if query is None:
         return
 
-    user = update.effective_user
-    if user is None or not _is_configured_admin_id(user.id):
-        await query.answer("❌ Only the admin can approve or reject vouches.")
+    if not await _require_configured_admin(
+        update,
+        denied_text="❌ Only the admin can approve or reject vouches.",
+    ):
         return
 
     data = query.data or ""
@@ -2337,6 +2474,7 @@ async def post_init(application: Application) -> None:
     _sync_all_user_stats()
     await application.bot.set_my_commands([
         BotCommand("start", "Welcome message and command summary"),
+        BotCommand("help", "Detailed explanation for all commands"),
         BotCommand("vouch", "Vouch for a user (stored + broadcast)"),
         BotCommand("vouchanon", "Vouch anonymously (requires admin approval)"),
         BotCommand("neg", "Create a negative vouch entry (admin only)"),
@@ -2371,6 +2509,7 @@ async def post_init(application: Application) -> None:
 
 
 def run_bot() -> None:
+    _validate_startup_config()
     application = (
         Application.builder()
         .token(_get_required_token())
@@ -2378,6 +2517,7 @@ def run_bot() -> None:
         .build()
     )
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("vouch", vouch))
     application.add_handler(CommandHandler("vouchanon", vouchanon))
     application.add_handler(CommandHandler("neg", neg))
