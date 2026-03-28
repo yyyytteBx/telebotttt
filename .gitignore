@@ -1,2 +1,26 @@
 __pycache__/
 .test_sandbox/
+
+# Local environment and secrets
+.env
+.env.*
+
+# Virtual environments
+.venv/
+venv/
+
+# Runtime data
+*.db
+*.db-*
+vouch.db*
+
+# Python caches and build artifacts
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local IDE metadata
+.idea/
+

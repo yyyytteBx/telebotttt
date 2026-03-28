@@ -10,6 +10,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
+from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 load_dotenv()
@@ -1064,7 +1065,10 @@ async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         return True
     if chat.type == "private":
         return False
-    member = await context.bot.get_chat_member(chat.id, user.id)
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+    except TelegramError:
+        return False
     return member.status in ("administrator", "creator")
 
 
@@ -1812,6 +1816,9 @@ async def neg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
+    if not await _is_admin(update, context):
+        await message.reply_text("❌ Only group admins can use this command.")
+        return
     if len(context.args) < 2:
         await message.reply_text("Usage: /neg @user reason")
         return
@@ -2335,8 +2342,8 @@ async def post_init(application: Application) -> None:
         BotCommand("rejectanon", "Reject anon vouch with a reason (admin only)"),
         BotCommand("removevouch", "Remove your last vouch for a user"),
         BotCommand("unvouch", "Reverse your latest stored vouch for a user"),
-        BotCommand("negvouch", "Open a pending negative-vouch case (admin only)"),
-        BotCommand("resolvenegvouch", "Resolve a pending negative-vouch case (admin only)"),
+        BotCommand("negvouch", "Alias for /neg (admin only)"),
+        BotCommand("resolvenegvouch", "Alias for /resolve (admin only)"),
         BotCommand("vouches", "View vouches for a user"),
         BotCommand("profile", "View NTN-style profile with trust score"),
         BotCommand("stats", "View your own positive/negative rep stats"),
