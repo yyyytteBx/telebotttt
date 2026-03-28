@@ -272,6 +272,8 @@ Shows a short welcome/help message.
 ### `/help`
 Shows a detailed in-chat guide that explains command usage, permissions, and behavior. Long output is split across multiple messages automatically.
 
+`/help <command>` also returns focused help for one command.
+
 ### `/vouch @user message`
 Creates a positive vouch.
 

@@ -1186,8 +1186,8 @@ def _build_help_text() -> str:
         "General commands\n"
         "/start\n"
         "Shows a quick introduction and command summary.\n\n"
-        "/help\n"
-        "Shows this full help guide with detailed explanations for every command.\n\n"
+        "/help [command]\n"
+        "Shows this full help guide, or command-specific help when a command is provided.\n\n"
         "/vouch @user reason\n"
         "Adds a positive vouch. The vouch is stored, broadcast, and sent with a confirm button.\n"
         "Rules: no self-vouch, blacklist checks, per-target cooldown, and daily limit.\n\n"
@@ -1244,6 +1244,51 @@ def _build_help_text() -> str:
     )
 
 
+HELP_TOPIC_TEXTS: dict[str, str] = {
+    "start": "/start\nShows the quick intro and common command shortcuts.",
+    "help": "/help [command]\nShows the full guide, or focused help for one command. Examples: /help vouch, /help /resolve.",
+    "vouch": "/vouch @user reason\nAdds a positive vouch with anti-abuse checks and a broadcast confirmation flow.",
+    "vouchanon": "/vouchanon @user reason\nSends an anonymous vouch into admin review. It is only broadcast after approval.",
+    "removevouch": "/removevouch @user\nRemoves your latest stored vouch for the target user.",
+    "unvouch": "/unvouch @user reason\nRemoves your latest vouch for the target and posts a broadcast unvouch note.",
+    "vouches": "/vouches @user\nShows recent vouches received by the target user.",
+    "profile": "/profile @user\nShows trust profile stats (total, confirmed, negatives, score, risk, rank, blacklist status).",
+    "stats": "/stats\nShows your own reputation and activity metrics.",
+    "search": "/search @user\nShows recent vouches received and given by the target user key.",
+    "recent": "/recent\nShows latest vouches across the system.",
+    "top": "/top\nShows top users by trust score.",
+    "leaderboard": "/leaderboard\nShows detailed ranking with totals, confirmed, negatives, score, and risk.",
+    "groupinfo": "/groupinfo\nShows metadata for the current Telegram chat.",
+    "neg": "/neg @user reason\nCreates a negative vouch entry. Requires group admin or configured admin.",
+    "negvouch": "/negvouch\nAlias for /neg.",
+    "resolve": "/resolve @user [note]\nResolves unresolved negative entries for a user. Requires group admin or configured admin.",
+    "resolvenegvouch": "/resolvenegvouch\nAlias for /resolve.",
+    "flag": "/flag @user note\nPosts a review flag and logs the action.",
+    "pending_vouches": "/pending_vouches\nLists anonymous submissions waiting for decision. Configured-admin only.",
+    "approveanon": "/approveanon <vouch_id> reason\nApproves a pending anonymous vouch. Configured-admin only.",
+    "rejectanon": "/rejectanon <vouch_id> reason\nRejects a pending anonymous vouch. Configured-admin only.",
+    "blacklist": "/blacklist @user reason\nAdds or updates blacklist status. Requires group admin or configured admin.",
+    "unblacklist": "/unblacklist @user\nRemoves a user from blacklist. Requires group admin or configured admin.",
+    "stafflogs": "/stafflogs [limit]\nShows recent staff actions (default 15, max 50). Configured-admin only.",
+    "export": "/export <vouches|negvouches|blacklist|anon|stafflogs> <csv|json>\nExports bot data. Configured-admin only.",
+}
+
+
+HELP_TOPIC_ALIASES: dict[str, str] = {
+    "negvouch": "negvouch",
+    "resolvenegvouch": "resolvenegvouch",
+}
+
+
+def _normalize_help_topic(raw_topic: str) -> str:
+    topic = (raw_topic or "").strip().lower()
+    if topic.startswith("/"):
+        topic = topic[1:]
+    if "@" in topic:
+        topic = topic.split("@", 1)[0]
+    return HELP_TOPIC_ALIASES.get(topic, topic)
+
+
 async def _reply_long_text(message: Any, text: str, chunk_size: int = 3800) -> None:
     if len(text) <= chunk_size:
         await message.reply_text(text)
@@ -1274,6 +1319,22 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not await _ensure_chat_allowed(update):
         return
+
+    if len(context.args) > 1:
+        await message.reply_text("Usage: /help [command]")
+        return
+
+    if context.args:
+        topic = _normalize_help_topic(context.args[0])
+        topic_text = HELP_TOPIC_TEXTS.get(topic)
+        if topic_text is None:
+            await message.reply_text(
+                f"Unknown command '{context.args[0]}'. Use /help for the full command list."
+            )
+            return
+        await message.reply_text(f"📘 Command Help\n\n{topic_text}")
+        return
+
     await _reply_long_text(message, _build_help_text())
 
 
@@ -1302,7 +1363,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/groupinfo\n\n"
         "Admin: /resolvenegvouch <case_id> resolution\n\n"
         "Use /search @user for more details.\n"
-        "Use /help for the full command guide."
+        "Use /help for the full command guide, or /help <command> for focused help."
     )
 
 

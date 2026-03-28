@@ -82,7 +82,7 @@ python bot.py
 ### Community commands
 
 - `/start`
-- `/help`
+- `/help [command]`
 - `/vouch @user reason`
 - `/vouchanon @user reason`
 - `/removevouch @user`
